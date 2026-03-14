@@ -238,6 +238,35 @@ class TTSRequest(BaseModel):
     text: str
 
 
+def _is_finalized_session(session: dict, evaluation: Optional[dict] = None) -> bool:
+    """Only completed interviews should appear in recruiter/results views."""
+    status = (session.get("status") or "").lower()
+    stage = (session.get("stage") or "").upper()
+    return bool(evaluation) and (status == "completed" or stage == "COMPLETE")
+
+
+def _get_finalized_candidate_count(job_id: str) -> int:
+    """Room summary count should match the results page count."""
+    sessions_res = es.search(
+        index="interview_session_index",
+        size=1000,
+        query={"term": {"job_id": job_id}},
+        sort=[{"started_at": {"order": "desc"}}],
+    )
+    candidate_ids: set[str] = set()
+    for hit in sessions_res["hits"]["hits"]:
+        session = hit["_source"]
+        try:
+            evaluation = es.get(index="evaluation_index", id=session["session_id"])["_source"]
+        except NotFoundError:
+            evaluation = None
+        if _is_finalized_session(session, evaluation):
+            cand_id = session.get("candidate_id")
+            if cand_id:
+                candidate_ids.add(cand_id)
+    return len(candidate_ids)
+
+
 @app.get("/api/tts/health")
 @app.get("/tts/health")
 def tts_health():
@@ -722,6 +751,8 @@ def get_room_candidates(room_code: str):
             evaluation = es.get(index="evaluation_index", id=session["session_id"])["_source"]
         except NotFoundError:
             evaluation = None
+        if not _is_finalized_session(session, evaluation):
+            continue
         results.append({
             "session":    session,
             "candidate":  profile,
@@ -748,14 +779,7 @@ def get_interviewer_rooms(interviewer_id: str):
     rooms = []
     for hit in result["hits"]["hits"]:
         room_data = hit["_source"]
-        
-        # Get candidate count for this room
-        candidate_count_res = es.search(
-            index="candidate_profile_index",
-            size=0,
-            query={"term": {"job_id": room_data["job_id"]}},
-        )
-        candidate_count = candidate_count_res["hits"]["total"]["value"]
+        candidate_count = _get_finalized_candidate_count(room_data["job_id"])
         
         rooms.append({
             "job_id": room_data["job_id"],
@@ -821,12 +845,15 @@ def get_room_results(room_code: str):
                 evaluation = eval_res["_source"]
             except NotFoundError:
                 evaluation = None
+            if not _is_finalized_session(session, evaluation):
+                continue
                 
             sessions_with_eval.append({
                 "session": session,
                 "evaluation": evaluation
             })
-        
+        if not sessions_with_eval:
+            continue
         candidates_with_results.append({
             "candidate": candidate,
             "sessions": sessions_with_eval,
@@ -869,6 +896,8 @@ def get_candidate_details(candidate_id: str):
             evaluation = eval_res["_source"]
         except NotFoundError:
             evaluation = None
+        if not _is_finalized_session(session, evaluation):
+            continue
         
         # Get interview transcript
         try:
