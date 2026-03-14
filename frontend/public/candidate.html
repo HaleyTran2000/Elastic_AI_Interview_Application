@@ -1459,6 +1459,12 @@ async function speakWithPiper(text, finishResponse) {
   _ttsAudio = audio;
 
   await new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      finishResponse();
+    };
     const cleanup = () => {
       audio.onended = null;
       audio.onerror = null;
@@ -1468,7 +1474,7 @@ async function speakWithPiper(text, finishResponse) {
       setRobotSpeaking(false);
       URL.revokeObjectURL(url);
       if (_ttsAudio === audio) _ttsAudio = null;
-      finishResponse();
+      settle();
       resolve();
     };
     audio.onerror = () => {
@@ -1476,6 +1482,7 @@ async function speakWithPiper(text, finishResponse) {
       setRobotSpeaking(false);
       URL.revokeObjectURL(url);
       if (_ttsAudio === audio) _ttsAudio = null;
+      settle();
       reject(new Error('Piper audio playback failed'));
     };
     audio.play().then(() => {
@@ -1485,6 +1492,7 @@ async function speakWithPiper(text, finishResponse) {
       setRobotSpeaking(false);
       URL.revokeObjectURL(url);
       if (_ttsAudio === audio) _ttsAudio = null;
+      settle();
       reject(err);
     });
   });
@@ -1497,62 +1505,77 @@ function speakAIResponse(text) {
     else setMicEnabled(true);
   };
 
-  if (!text) { finishResponse(); return; }
+  if (!text) { finishResponse(); return Promise.resolve(); }
   window.speechSynthesis && window.speechSynthesis.cancel();
 
-  speakWithPiper(text, finishResponse).catch(() => {
+  return speakWithPiper(text, finishResponse).catch(() => {
     if (_ttsAudio) {
       _ttsAudio.pause();
       if (_ttsAudio.dataset.url) URL.revokeObjectURL(_ttsAudio.dataset.url);
       _ttsAudio = null;
     }
-    speakWithBrowserTTS(text, finishResponse);
+    return speakWithBrowserTTS(text, finishResponse);
   });
 }
 
 function speakWithBrowserTTS(text, finishResponse) {
-  if (!text || !window.speechSynthesis) { finishResponse(); return; }
+  if (!text || !window.speechSynthesis) { finishResponse(); return Promise.resolve(); }
 
-  const doSpeak = () => {
-    const utterance = new SpeechSynthesisUtterance(text);
-    if (_ttsVoice) utterance.voice = _ttsVoice;
-    utterance.rate   = 1.0;
-    utterance.pitch  = 1.0;
-    utterance.volume = 1.0;
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      finishResponse();
+      resolve();
+    };
+
+    const doSpeak = () => {
+      const utterance = new SpeechSynthesisUtterance(text);
+      if (_ttsVoice) utterance.voice = _ttsVoice;
+      utterance.rate   = 1.0;
+      utterance.pitch  = 1.0;
+      utterance.volume = 1.0;
 
     // Fallback: open mic after estimated speaking time even if onend never fires
     const words       = text.trim().split(/\s+/).length;
     const estimatedMs = Math.max(4000, words * 380);   // ~158 wpm estimate
     const fallback    = setTimeout(() => {
-      finishResponse();
+      settle();
     }, estimatedMs);
 
     utterance.onstart = () => setRobotSpeaking(true);
-    utterance.onend   = () => { clearTimeout(fallback); finishResponse(); };
-    utterance.onerror = () => { clearTimeout(fallback); finishResponse(); };
+    utterance.onend   = () => { clearTimeout(fallback); settle(); };
+    utterance.onerror = () => { clearTimeout(fallback); settle(); };
     window.speechSynthesis.speak(utterance);
 
     // Chrome bug: speech queued but never starts — detect after 1.5 s and bail
     setTimeout(() => {
       if (!window.speechSynthesis.speaking && !window.speechSynthesis.pending) {
         clearTimeout(fallback);
-        finishResponse();
+        settle();
       }
     }, 1500);
   };
 
   // Voices might not be loaded on the very first call
-  if (window.speechSynthesis.getVoices().length === 0) {
-    window.speechSynthesis.onvoiceschanged = () => { loadTTSVoice(); doSpeak(); };
+    if (window.speechSynthesis.getVoices().length === 0) {
+      const previousHandler = window.speechSynthesis.onvoiceschanged;
+      window.speechSynthesis.onvoiceschanged = () => {
+        window.speechSynthesis.onvoiceschanged = previousHandler || null;
+        loadTTSVoice();
+        doSpeak();
+      };
     setTimeout(() => {
       if ((_state.inputMode === 'chat' && document.getElementById('chat-input')?.disabled) ||
           (_state.inputMode === 'mic' && !_micEnabled)) {
-        finishResponse();
+        settle();
       }
     }, 2500);
-  } else {
-    doSpeak();
-  }
+    } else {
+      doSpeak();
+    }
+  });
 }
 
 // ─── Screen 3: WebSocket interview ─────────────────────────────────────────
@@ -1587,20 +1610,22 @@ function connectWS() {
     if (data.stage) setStage(data.stage);
 
     const text = data.message || '';
+    let speechPromise = Promise.resolve();
     if (text) {
       appendMsg('ai', text);
-      speakAIResponse(text);
+      speechPromise = speakAIResponse(text);
     }
 
     // Check if interview is done
     if (data.stage === 'COMPLETE') {
       setWsStatus('connected');
       setMicEnabled(false);
-      window.speechSynthesis && window.speechSynthesis.cancel();
-      stopAndSaveRecording().then(() => {
-        setTimeout(() => {
-          document.getElementById('complete-overlay').style.display = 'flex';
-        }, 800);
+      speechPromise.finally(() => {
+        stopAndSaveRecording().then(() => {
+          setTimeout(() => {
+            document.getElementById('complete-overlay').style.display = 'flex';
+          }, 800);
+        });
       });
       if (_presenceInterval) { clearInterval(_presenceInterval); _presenceInterval = null; }
       return;

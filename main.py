@@ -264,10 +264,9 @@ class TTSRequest(BaseModel):
 
 
 def _is_finalized_session(session: dict, evaluation: Optional[dict] = None) -> bool:
-    """Only completed interviews should appear in recruiter/results views."""
+    """Only fully completed interviews should appear in recruiter/results views."""
     status = (session.get("status") or "").lower()
-    stage = (session.get("stage") or "").upper()
-    return bool(evaluation) and (status == "completed" or stage == "COMPLETE")
+    return status == "completed"
 
 
 def _get_evaluations_by_session_ids(session_ids: list[str]) -> dict[str, dict]:
@@ -1821,15 +1820,24 @@ async def interview_ws(
 
     except WebSocketDisconnect:
         log.info("WS disconnected  session=%s", session_id)
-        es.update(
-            index="interview_session_index", id=session_id,
-            doc={"status": "disconnected", "completed_at": datetime.now(timezone.utc).isoformat()},
-        )
+        already_completed = False
+        try:
+            current_session = es.get(index="interview_session_index", id=session_id)["_source"]
+            already_completed = (current_session.get("status") or "").lower() == "completed"
+        except Exception:
+            current_session = {}
+
+        if not already_completed:
+            es.update(
+                index="interview_session_index", id=session_id,
+                doc={"status": "disconnected", "completed_at": datetime.now(timezone.utc).isoformat()},
+            )
         _session_history.pop(session_id, None)
-        # Fire evaluation pipeline even on early disconnect (if enough transcript exists)
-        asyncio.create_task(
-            _run_post_interview_pipeline(session_id, job_id, candidate_id, None)
-        )
+        # Fire evaluation pipeline only for interrupted sessions.
+        if not already_completed:
+            asyncio.create_task(
+                _run_post_interview_pipeline(session_id, job_id, candidate_id, None)
+            )
     except httpx.HTTPError as exc:
         log.error("Agent relay error  session=%s  %s", session_id, exc)
         await websocket.send_json({"role": "system", "error": str(exc)})
