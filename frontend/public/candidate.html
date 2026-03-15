@@ -883,7 +883,7 @@
 
 <script>
 // ─── State ────────────────────────────────────────────────────────────────────
-const API = '/api';
+const API = window.location.port === '8001' ? '' : '/api';
 let _state = {
   roomCode: '',
   jobId: '',
