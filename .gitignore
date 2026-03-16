@@ -18,3 +18,5 @@ esdata/
 cv/
 recordings/
 *.pdf
+tools/
+models/
