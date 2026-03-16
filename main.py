@@ -46,10 +46,33 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Allow the Node.js frontend (port 3000) + any localhost origin
+def _get_cors_origins() -> list[str]:
+    origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8001",
+        "http://127.0.0.1:8001",
+    ]
+    extra_origins = [
+        os.getenv("FRONTEND_URL", "").strip(),
+        os.getenv("NGROK_FRONTEND_URL", "").strip(),
+    ]
+    extra_origins.extend(
+        origin.strip()
+        for origin in os.getenv("ADDITIONAL_CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    )
+    for origin in extra_origins:
+        if origin and origin not in origins:
+            origins.append(origin.rstrip("/"))
+    return origins
+
+
+# Allow localhost by default and optionally a configured frontend/ngrok origin.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:8001"],
+    allow_origins=_get_cors_origins(),
+    allow_origin_regex=r"^https://[a-z0-9-]+\.(ngrok-free\.app|ngrok\.app|ngrok-free\.dev|ngrok\.dev)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -853,10 +876,17 @@ def get_interviewer_rooms(interviewer_id: str):
         index="job_requirements_index",
         size=100,
         query={"term": {"interviewer_id": interviewer_id}},
-        sort=[{"created_at": {"order": "desc"}}],
     )
-    
-    room_hits = result["hits"]["hits"]
+
+    room_hits = sorted(
+        result["hits"]["hits"],
+        key=lambda hit: (
+            hit.get("_source", {}).get("created_at")
+            or hit.get("_source", {}).get("updated_at")
+            or ""
+        ),
+        reverse=True,
+    )
     job_ids = [hit["_source"]["job_id"] for hit in room_hits]
     candidate_counts = _get_finalized_candidate_counts_by_job_ids(job_ids)
 
